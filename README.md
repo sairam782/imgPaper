@@ -15,7 +15,7 @@ Paste an arXiv link, upload a PDF, or drop in the text.
 **A theme map.** The paper's argument as a labelled graph: the core claim in the
 centre, what was broken on the left, the machinery across the top, supporting
 ideas on the right, evidence and consequences along the bottom. Every edge is a
-real relationship — *self-attention* **removes** *sequential bottleneck* — not a
+real relationship *self-attention* **removes** *sequential bottleneck* not a
 vague line between related things. Hover anything to see what it means and what
 it connects to.
 
@@ -25,8 +25,8 @@ build on the work. Each level stands alone; the shallow one is not a truncation
 of the deep one.
 
 **The method as a pipeline.** Ordered stages you can step through, each with
-what it does, what goes in and out, and — the part papers usually leave implicit
-— why that step exists at all.
+what it does, what goes in and out, and the part papers usually leave implicit
+why that step exists at all.
 
 **Evidence, charted honestly.** Headline numbers against their baselines, scaled
 against each other rather than against zero so a two percent gain is not drawn
@@ -41,7 +41,7 @@ not read it front to back, and a few questions that reveal whether it landed.
 ## Try it without an API key
 
 The repo ships a complete, hand-checked digest of *Attention Is All You Need*.
-Start the server and click **See a finished example** — every part of the
+Start the server and click **See a finished example** every part of the
 interface works against it, no key needed.
 
 ## Run it locally
