@@ -1,0 +1,21 @@
+[project]
+name = "paperprism"
+version = "0.1.0"
+description = "Refract a research paper into a theme map, a method diagram and a layered summary."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI declares request parsing via call expressions in argument defaults.
+"app/main.py" = ["B008"]
