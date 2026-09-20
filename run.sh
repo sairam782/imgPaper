@@ -31,11 +31,56 @@ die()  { printf '\033[31mx\033[0m   %s\n' "$1" >&2; exit 1; }
 
 # --- prerequisites ---------------------------------------------------------
 
-command -v python3 >/dev/null || die "python3 is not installed."
-command -v node    >/dev/null || die "node is not installed. Get it from https://nodejs.org"
-command -v npm     >/dev/null || die "npm is not installed (it ships with node)."
+# Node is needed to build the frontend once; after that it is only needed
+# again when the frontend source changes. Tell people how to get it on the
+# machine they are actually sitting at rather than pointing at a download page.
+# The package name differs from the command name and from one package manager
+# to the next: on Debian `node` is an unrelated ham-radio program, and the one
+# you want is `nodejs`. Getting this wrong sends people to install the wrong
+# thing, so each manager gets its own name.
+#
+#   how_to_install <brew-name> <deb/rpm-name> <arch-name> <download-url>
+how_to_install() {
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew >/dev/null; then
+        echo "Install it with:  brew install $1"
+      else
+        echo "Install Homebrew from https://brew.sh, then:  brew install $1"
+        echo "Or download the macOS installer from $4"
+      fi
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null; then
+        echo "Install it with:  sudo apt install $2"
+      elif command -v dnf >/dev/null; then
+        echo "Install it with:  sudo dnf install $2"
+      elif command -v pacman >/dev/null; then
+        echo "Install it with:  sudo pacman -S $3"
+      else
+        echo "Get it from $4"
+      fi
+      ;;
+    *) echo "Get it from $4" ;;
+  esac
+}
 
-python3 - <<'PY' || die "PaperPrism needs Python 3.10 or newer."
+missing() {
+  printf '\033[31mx\033[0m   %s is not installed.\n' "$1" >&2
+  shift
+  how_to_install "$@" | while IFS= read -r line; do printf '    %s\n' "$line" >&2; done
+  printf '    Then run ./run.sh again.\n' >&2
+  exit 1
+}
+
+NODE_URL=https://nodejs.org
+PY_URL=https://www.python.org/downloads/
+
+command -v python3 >/dev/null || missing "python3" python3 python3 python "$PY_URL"
+command -v node    >/dev/null || missing "node" node nodejs nodejs "$NODE_URL"
+command -v npm     >/dev/null || missing "npm (it ships with node)" node npm nodejs "$NODE_URL"
+
+python3 - <<'PY' || die "PaperPrism needs Python 3.10 or newer. You have $(python3 -V 2>&1)."
 import sys
 sys.exit(0 if sys.version_info >= (3, 10) else 1)
 PY
