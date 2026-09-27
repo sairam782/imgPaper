@@ -1,34 +1,24 @@
-"""Render a theme map as Cypher, so a digest can be loaded into Neo4j.
+"""Render the derived paper graph as Cypher, so a digest can become a Neo4j database.
 
-The graph view already reads like a Neo4j result; this lets it actually become
-one. The output is a single statement block that can be pasted straight into
-Neo4j Browser or piped through cypher-shell.
+The graph view already reads like a Neo4j result; this lets it actually be one.
+The output is a single block that can be pasted into Neo4j Browser or piped
+through cypher-shell.
 """
 
 from __future__ import annotations
 
 import re
 
-from .models import ThemeMap
+from .graph_model import PaperGraph
 
 # Cypher identifiers cannot start with a digit and allow only word characters.
 _NON_WORD = re.compile(r"\W+")
 _LEADING_DIGIT = re.compile(r"^(?=\d)")
 
-KIND_LABEL = {
-    "core": "CoreIdea",
-    "problem": "Problem",
-    "method": "Method",
-    "concept": "Concept",
-    "evidence": "Evidence",
-    "implication": "Implication",
-}
-
 
 def quote(value: str) -> str:
     """Escape a string for a single-quoted Cypher literal."""
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
-    # A literal newline would break the statement across lines.
     return "'" + escaped.replace("\n", "\\n").replace("\r", "") + "'"
 
 
@@ -46,46 +36,53 @@ def variable(node_id: str, used: set[str]) -> str:
     return candidate
 
 
-def rel_type(label: str) -> str:
-    """Turn 'is built from' into IS_BUILT_FROM."""
-    cleaned = _NON_WORD.sub("_", label).strip("_").upper()
-    return _LEADING_DIGIT.sub("R", cleaned) or "RELATED_TO"
+def _props(pairs: dict[str, str | float | int]) -> str:
+    rendered = []
+    for key, value in pairs.items():
+        safe_key = _NON_WORD.sub("_", key).strip("_") or "prop"
+        safe_key = _LEADING_DIGIT.sub("p", safe_key)
+        if isinstance(value, (int, float)):
+            rendered.append(f"{safe_key}: {value:g}")
+        else:
+            rendered.append(f"{safe_key}: {quote(value)}")
+    return "{" + ", ".join(rendered) + "}"
 
 
-def to_cypher(theme_map: ThemeMap, *, title: str | None = None) -> str:
-    """Build the CREATE statement for a theme map."""
+def to_cypher(graph: PaperGraph, *, title: str | None = None) -> str:
+    """Build the CREATE statements for a whole paper graph."""
     used: set[str] = set()
     variables: dict[str, str] = {}
 
     lines: list[str] = []
     if title:
         lines.append(f"// {title}")
-    lines.append(f"// {theme_map.core}")
+    lines.append(f"// {len(graph.nodes)} nodes, {len(graph.edges)} relationships")
     lines.append("")
 
-    for node in theme_map.nodes:
+    for node in graph.nodes:
         name = variable(node.id, used)
         variables[node.id] = name
-        label = KIND_LABEL.get(node.kind, "Concept")
-        lines.append(
-            f"CREATE ({name}:Idea:{label} "
-            f"{{id: {quote(node.id)}, name: {quote(node.label)}, "
-            f"weight: {node.weight:g}, summary: {quote(node.blurb)}}})"
-        )
+        pairs: dict[str, str | float | int] = {
+            "id": node.id,
+            "name": node.label,
+            "weight": round(node.weight, 3),
+            "degree": node.degree,
+        }
+        if node.blurb:
+            pairs["summary"] = node.blurb
+        pairs.update(node.props)
+        lines.append(f"CREATE ({name}:{node.kind} {_props(pairs)})")
 
-    edges = [
-        edge
-        for edge in theme_map.edges
-        if edge.source in variables and edge.target in variables
-    ]
-    if edges:
+    if graph.edges:
         lines.append("")
-        for edge in edges:
-            source = variables[edge.source]
-            target = variables[edge.target]
-            lines.append(
-                f"CREATE ({source})-[:{rel_type(edge.label)} "
-                f"{{label: {quote(edge.label)}}}]->({target})"
-            )
+        for edge in graph.edges:
+            source = variables.get(edge.source)
+            target = variables.get(edge.target)
+            if not source or not target:
+                continue
+            pairs: dict[str, str | float | int] = {"label": edge.label}
+            if edge.derived:
+                pairs["derived"] = "true"
+            lines.append(f"CREATE ({source})-[:{edge.type} {_props(pairs)}]->({target})")
 
     return "\n".join(lines) + "\n"

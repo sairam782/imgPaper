@@ -154,24 +154,38 @@ def test_upload_job_runs_the_pdf_pipeline(monkeypatch, demo_digest):
     assert seen["bytes"] == len(pdf)
 
 
+def test_graph_endpoint_expands_the_digest(demo_digest):
+    response = client.post(
+        "/api/graph", json={"digest": demo_digest.model_dump(mode="json")}
+    )
+    assert response.status_code == 200
+
+    graph = response.json()
+    assert len(graph["nodes"]) > len(demo_digest.theme_map.nodes) * 3
+    assert {"Paper", "Concept", "Step", "Metric"} <= set(graph["counts"])
+    assert graph["insights"]
+    assert "Term" in graph["quiet"]
+
+    ids = {n["id"] for n in graph["nodes"]}
+    assert all(e["source"] in ids and e["target"] in ids for e in graph["edges"])
+
+
 def test_cypher_export_endpoint_returns_a_loadable_statement(demo_digest):
     response = client.post(
-        "/api/export/cypher",
-        json={
-            "theme_map": demo_digest.theme_map.model_dump(mode="json"),
-            "title": demo_digest.meta.title,
-        },
+        "/api/export/cypher", json={"digest": demo_digest.model_dump(mode="json")}
     )
     assert response.status_code == 200
 
     cypher = response.json()["cypher"]
     assert cypher.startswith("// Attention Is All You Need")
-    assert cypher.count("CREATE (") == len(demo_digest.theme_map.nodes) + len(
-        demo_digest.theme_map.edges
-    )
-    assert ":Idea:CoreIdea" in cypher
+    assert ":Paper {" in cypher
+    assert ":Step {" in cypher
 
 
-def test_cypher_export_rejects_a_malformed_map():
-    response = client.post("/api/export/cypher", json={"theme_map": {"core": "x"}})
+def test_graph_endpoint_rejects_a_malformed_digest():
+    assert client.post("/api/graph", json={"digest": {"tldr": "nope"}}).status_code == 422
+
+
+def test_cypher_export_rejects_a_malformed_digest():
+    response = client.post("/api/export/cypher", json={"digest": {"theme": "x"}})
     assert response.status_code == 422

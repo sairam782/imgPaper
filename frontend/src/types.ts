@@ -156,3 +156,41 @@ export interface JobSnapshot {
   error?: string;
   digest?: Digest;
 }
+
+/* ---- the derived whole-paper graph (backend/app/graph_model.py) ---- */
+
+export type NodeLabel =
+  | "Paper" | "Concept" | "Step" | "Artifact" | "Metric"
+  | "Contribution" | "Limitation" | "Term" | "Prereq" | "Section";
+
+export interface GraphNode {
+  id: string;
+  label: string;
+  kind: NodeLabel;
+  blurb: string;
+  weight: number;
+  degree: number;
+  props: Record<string, string>;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  type: string;
+  label: string;
+  derived: boolean;
+}
+
+export interface Insight {
+  kind: string;
+  headline: string;
+  detail: string;
+}
+
+export interface PaperGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  insights: Insight[];
+  counts: Record<string, number>;
+  quiet: NodeLabel[];
+}

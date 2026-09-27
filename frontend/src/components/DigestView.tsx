@@ -1,9 +1,12 @@
-import type { Digest } from "../types";
+import { useEffect, useState } from "react";
+
+import { exportCypher, fetchGraph } from "../api";
+import type { Digest, PaperGraph } from "../types";
 import DepthDial from "./DepthDial";
+import GraphView from "./GraphView";
 import MethodFlow from "./MethodFlow";
 import { Checks, Contributions, Glossary, Limitations, Prereqs, ReadingPath, Sections } from "./Panels";
 import ResultsChart from "./ResultsChart";
-import ThemeMap from "./ThemeMap";
 
 function Block({
   id,
@@ -38,8 +41,55 @@ function byline(digest: Digest): string {
   return [names, venue, year ? String(year) : null].filter(Boolean).join(" · ");
 }
 
+/** What the graph reveals that the prose does not say outright. */
+function Insights({ graph }: { graph: PaperGraph }) {
+  if (graph.insights.length === 0) return null;
+  return (
+    <div className="insights">
+      {graph.insights.map((insight, index) => (
+        <article key={index} className={`insight is-${insight.kind}`}>
+          <h4>{insight.headline}</h4>
+          <p>{insight.detail}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
 export default function DigestView({ digest, onReset }: { digest: Digest; onReset: () => void }) {
   const credit = byline(digest);
+
+  const [graph, setGraph] = useState<PaperGraph | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
+  const [cypher, setCypher] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setGraph(null);
+    setGraphError(null);
+    fetchGraph(digest)
+      .then((result) => !cancelled && setGraph(result))
+      .catch((caught) =>
+        !cancelled &&
+        setGraphError(caught instanceof Error ? caught.message : "Could not build the graph."),
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [digest]);
+
+  const showCypher = async () => {
+    try {
+      setCypher(await exportCypher(digest));
+    } catch (caught) {
+      setCypher(
+        `// Could not build the export: ${
+          caught instanceof Error ? caught.message : "unknown error"
+        }`,
+      );
+    }
+  };
 
   return (
     <div className="digest rise">
@@ -73,10 +123,19 @@ export default function DigestView({ digest, onReset }: { digest: Digest; onRese
 
       <Block
         id="map"
-        title="The paper as a map"
-        blurb="Every idea in the paper and how it connects, arranged by the role it plays in the argument."
+        title="The whole paper as a graph"
+        blurb="Every idea, stage, number, contribution and caveat in the digest, and each connection between them."
       >
-        <ThemeMap map={digest.theme_map} title={digest.meta.title} />
+        {graph ? (
+          <>
+            <GraphView graph={graph} onExport={showCypher} />
+            <Insights graph={graph} />
+          </>
+        ) : graphError ? (
+          <div className="notice is-inline">{graphError}</div>
+        ) : (
+          <div className="card graph-loading">Building the graph…</div>
+        )}
       </Block>
 
       <Block
@@ -174,6 +233,45 @@ export default function DigestView({ digest, onReset }: { digest: Digest; onRese
         >
           <Checks items={digest.checks} />
         </Block>
+      )}
+
+      {cypher !== null && (
+        <div
+          className="cypher-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Cypher export"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setCypher(null);
+          }}
+        >
+          <div className="cypher-sheet">
+            <header>
+              <h4>Load this paper into Neo4j</h4>
+              <button className="chip" onClick={() => setCypher(null)}>
+                Close
+              </button>
+            </header>
+            <p className="depth-note" style={{ marginTop: 0 }}>
+              Paste into Neo4j Browser, or pipe through cypher-shell.
+            </p>
+            <pre>{cypher}</pre>
+            <button
+              className="primary"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(cypher);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1800);
+                } catch {
+                  setCopied(false);
+                }
+              }}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        </div>
       )}
 
       <footer className="digest-foot">
