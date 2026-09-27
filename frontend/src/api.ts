@@ -95,15 +95,27 @@ export function followJob(
   });
 }
 
-/** Render a theme map as Cypher, so the graph can be loaded into Neo4j. */
+/** Expand a digest into the whole paper as one graph. */
+export async function fetchGraph(
+  digest: import("./types").Digest,
+): Promise<import("./types").PaperGraph> {
+  const response = await fetch("/api/graph", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ digest }),
+  });
+  if (!response.ok) throw await failure(response);
+  return response.json();
+}
+
+/** Render that graph as Cypher, so it can be loaded into Neo4j. */
 export async function exportCypher(
-  themeMap: import("./types").ThemeMap,
-  title?: string,
+  digest: import("./types").Digest,
 ): Promise<string> {
   const response = await fetch("/api/export/cypher", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ theme_map: themeMap, title }),
+    body: JSON.stringify({ digest }),
   });
   if (!response.ok) throw await failure(response);
   const { cypher } = await response.json();

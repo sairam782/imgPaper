@@ -18,8 +18,9 @@ from .cache import DigestCache
 from .config import settings
 from .distill import Distiller, DistillError, load_demo_digest
 from .export_cypher import to_cypher
+from .graph_model import PaperGraph, build_graph
 from .jobs import STAGES, Job, registry
-from .models import Digest, ThemeMap
+from .models import Digest
 from .pipeline import IngestError, analyze_pdf_bytes, analyze_source
 
 app = FastAPI(
@@ -93,15 +94,26 @@ def get_digest(digest_id: str) -> Digest:
     return found
 
 
-class CypherRequest(BaseModel):
-    theme_map: ThemeMap
-    title: str | None = None
+class GraphRequest(BaseModel):
+    digest: Digest
+
+
+@app.post("/api/graph", response_model=PaperGraph)
+def paper_graph(request: GraphRequest) -> PaperGraph:
+    """Expand a digest into the whole paper as one property graph.
+
+    Derived rather than generated, so it costs no model call and works on any
+    digest that already exists.
+    """
+    return build_graph(request.digest)
 
 
 @app.post("/api/export/cypher")
-def export_cypher(request: CypherRequest) -> dict[str, str]:
-    """Render a theme map as Cypher so it can be loaded into Neo4j."""
-    return {"cypher": to_cypher(request.theme_map, title=request.title)}
+def export_cypher(request: GraphRequest) -> dict[str, str]:
+    """Render that graph as Cypher so it can be loaded into Neo4j."""
+    return {
+        "cypher": to_cypher(build_graph(request.digest), title=request.digest.meta.title)
+    }
 
 
 # --------------------------------------------------------------------------

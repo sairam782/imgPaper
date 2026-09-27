@@ -12,21 +12,37 @@ Paste an arXiv link, upload a PDF, or drop in the text.
 
 ## What you get
 
-**A graph of the argument.** The paper rendered the way Neo4j Browser renders a
-query result: circular nodes sized by importance, coloured and counted by label,
-joined by directed relationships that carry a real verb — *self-attention*
-**REMOVES** *sequential bottleneck*. Drag a node and it stays where you put it,
-double-click to release it, click one to open an inspector showing its
-properties and every relationship it takes part in. Hide a whole category from
-the label chips.
+**The whole paper as one graph.** Not just the argument — every idea, method
+stage, number, contribution, caveat, prerequisite, glossary term and section in
+the digest, and each connection between them. Around sixty nodes and eighty
+relationships for a typical paper, rendered the way Neo4j Browser renders a
+query result: circular nodes, directed relationships carrying a real verb,
+label chips with counts, and an inspector showing a node's properties and every
+relationship it takes part in. Click a relationship to walk to the other end.
 
-Unlike a plain force layout, position still means something: each category is
-pulled toward its own region — problems left, machinery across the top,
-consequences and evidence right and below — so the graph settles into the shape
-of the argument rather than into whatever the physics prefers.
+The connections are the point. Naming an input the same as an earlier stage's
+output is the paper telling you those stages are joined; the graph turns both
+into one node, so the method reads as a pipeline rather than a list. The
+glossary links to wherever its terms actually resurface, which is how you find
+out that one term is doing work in four different places.
 
-The **Cypher** button turns the graph into `CREATE` statements you can paste
-straight into Neo4j Browser, if you would rather query it than look at it.
+It is **derived from the digest**, not generated: no extra model call, works on
+anything already cached, and the same digest always yields the same graph.
+
+**Insights.** Below the graph, things the shape shows that the prose does not
+say: which idea holds the paper together, which intermediate every stage passes
+through, which vocabulary spreads widest, and — when it is true — which claims
+have no number anywhere near them.
+
+Colour carries the family and fill carries the member within it. A node-link
+graph is an all-pairs form, so every pair of colours must be separable, and
+only four hues of the reference palette clear that gate in both light and dark;
+ten would have been a palette that merely looked varied. Related labels
+therefore share a hue and differ by fill, and every node renders its caption
+inside it.
+
+The **Cypher** button turns the whole graph into `CREATE` statements you can
+paste into Neo4j Browser, if you would rather query it than look at it.
 
 **A summary at three depths.** The same paper written three times: no jargon at
 all, then for a researcher in an adjacent field, then for someone who might
@@ -155,15 +171,16 @@ should be checked against it.
 backend/
   app/
     models.py        the digest schema — start here
+    graph_model.py   expands a digest into the whole-paper graph
     ingest/          arxiv.py, pdf.py, sectionize.py
     distill/         prompt.py (the quality lives here), engine.py
     pipeline.py      source → parsed paper → digest
     jobs.py          in-process job registry behind the SSE stream
     main.py          the HTTP API
-  tests/             92 tests, no network or API key required
+  tests/             116 tests, no network or API key required
 frontend/
   src/
-    components/      ThemeMap.tsx is the graph view; graph.ts holds its layout
+    components/      GraphView.tsx is the graph; graph.ts holds layout and palette
     types.ts         mirrors models.py
 data/demo/           the bundled sample digest and the script that builds it
 ```

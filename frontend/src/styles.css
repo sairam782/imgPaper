@@ -25,6 +25,17 @@
   --evidence: #6ee7a0;
   --implication: #c39cff;
 
+  /* Graph palette. Four hues, because a node-link graph is an all-pairs form
+     and only four of the reference palette's hues clear every pair in both
+     modes; related labels share a hue and differ by fill. Validated with the
+     data-viz palette checker against each mode's own surface. */
+  --viz-1: #3987e5;   /* blue    - ideas */
+  --viz-2: #c98500;   /* yellow  - method */
+  --viz-3: #d55181;   /* magenta - caveats */
+  --viz-4: #008300;   /* green   - evidence */
+  --viz-ink: #cfd6e6;
+  --viz-muted: #7b8497;
+
   --radius: 14px;
   --radius-sm: 9px;
   --shadow: 0 18px 40px -22px rgba(0, 0, 0, 0.9);
@@ -56,6 +67,14 @@
   --concept: #12897f;
   --evidence: #1f9254;
   --implication: #7c4dcc;
+
+  /* Light steps of the same four hues, selected for the light surface. */
+  --viz-1: #2a78d6;
+  --viz-2: #eda100;
+  --viz-3: #e87ba4;
+  --viz-4: #008300;
+  --viz-ink: #2b3040;
+  --viz-muted: #8a9099;
 
   --shadow: 0 14px 34px -24px rgba(0, 0, 0, 0.4);
 }
@@ -495,6 +514,11 @@ section.block { margin-top: 62px; scroll-margin-top: 20px; }
   background: var(--chip);
   flex: 0 0 auto;
 }
+/* The chip mirrors the node: hollow label, hollow swatch. */
+.label-chip.is-hollow i {
+  background: color-mix(in srgb, var(--chip) 18%, transparent);
+  border: 1.5px dashed var(--chip);
+}
 
 .label-chip b {
   font-family: var(--mono);
@@ -503,7 +527,22 @@ section.block { margin-top: 62px; scroll-margin-top: 20px; }
   color: var(--text-dim);
 }
 
-.graph-controls { display: flex; gap: 4px; }
+.graph-controls { display: flex; gap: 4px; align-items: center; }
+
+.graph-search {
+  width: 110px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+}
+.graph-search:focus { border-color: var(--accent); }
+.graph-search::placeholder { color: var(--text-faint); }
 
 .graph-controls button {
   min-width: 30px;
@@ -546,7 +585,9 @@ section.block { margin-top: 62px; scroll-margin-top: 20px; }
 
 .link.is-lit path { stroke: var(--accent); stroke-width: 2.2; }
 .link.is-lit text { fill: var(--accent); }
-.link.is-dim { opacity: 0.13; }
+.link.is-dim { opacity: 0.08; }
+/* Inferred from wording rather than stated by the digest. */
+.link.is-derived path { stroke-dasharray: 5 4; }
 
 .arrow-head { fill: var(--border); }
 .arrow-head.is-lit { fill: var(--accent); }
@@ -561,27 +602,38 @@ section.block { margin-top: 62px; scroll-margin-top: 20px; }
 .node:active { cursor: grabbing; }
 .node.is-dim { opacity: 0.16; }
 
+/* Colour names the family; fill weight names the member within it. */
 .node-body {
-  stroke: var(--surface);
-  stroke-width: 2;
+  fill: color-mix(in srgb, var(--hue) 30%, var(--surface));
+  stroke: var(--hue);
+  stroke-width: 2.4;
   transition: filter 0.15s;
 }
-.node:hover .node-body { filter: brightness(1.15); }
+.node.is-hollow .node-body {
+  fill: color-mix(in srgb, var(--hue) 8%, var(--surface));
+  stroke-width: 1.6;
+  stroke-dasharray: 4 3;
+}
+.node:hover .node-body { filter: brightness(1.12); }
 
 .node-ring {
   fill: none;
+  stroke: var(--hue);
   stroke-width: 2;
   opacity: 0;
   transition: opacity 0.15s;
 }
-.node:hover .node-ring { opacity: 0.45; }
+.node:hover .node-ring { opacity: 0.4; }
 .node.is-selected .node-ring { opacity: 1; stroke-width: 2.5; }
 
+/* Captions wear the text token, never the series colour, so they stay legible
+   on every fill in both themes. They are also the secondary encoding that the
+   palette's two warning-band checks require. */
 .node-caption {
   text-anchor: middle;
   font-family: var(--sans);
   font-weight: 500;
-  fill: #10131a;
+  fill: var(--text);
   pointer-events: none;
 }
 
@@ -604,6 +656,16 @@ section.block { margin-top: 62px; scroll-margin-top: 20px; }
   margin-bottom: 12px;
 }
 .inspector-head h4 { font-size: 1.08rem; }
+.inspector-head .degree {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+.inspector-blurb { color: var(--text-dim); font-size: 0.92rem; margin: 0 0 12px; }
+
+.graph-loading { color: var(--text-faint); text-align: center; padding: 60px 20px; }
 
 .inspector-hint { color: var(--text-dim); font-size: 0.9rem; margin: 0; }
 .inspector-hint strong { color: var(--text); font-family: var(--display); }
@@ -644,6 +706,31 @@ section.block { margin-top: 62px; scroll-margin-top: 20px; }
 }
 .rel em { font-family: var(--mono); font-size: 0.68rem; font-style: normal; color: var(--text-faint); }
 .rel b { font-weight: 500; }
+.rel:hover { border-color: var(--accent); }
+.rel.is-derived { border-style: dashed; }
+
+/* ===== insights =========================================================== */
+
+.insights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.insight {
+  padding: 15px 17px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+}
+.insight h4 { font-family: var(--sans); font-size: 0.95rem; font-weight: 600; margin-bottom: 5px; }
+.insight p { color: var(--text-dim); font-size: 0.87rem; margin: 0; }
+
+.insight.is-evidence-gap { border-left-color: var(--viz-3); }
+.insight.is-orphans { border-left-color: var(--viz-2); }
+.insight.is-scale { border-left-color: var(--border); }
 
 /* ===== depth dial ========================================================= */
 
@@ -989,7 +1076,8 @@ section.block { margin-top: 62px; scroll-margin-top: 20px; }
   }
   .graph-labels::-webkit-scrollbar { display: none; }
   .label-chip { flex: 0 0 auto; }
-  .graph-toolbar { flex-wrap: nowrap; }
+  .graph-toolbar { flex-wrap: wrap; }
+  .graph-search { width: 90px; }
 
   .shell { padding: 0 16px 70px; }
   .topbar { padding: 16px; }
