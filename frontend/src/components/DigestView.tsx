@@ -76,7 +76,7 @@ export default function DigestView({ digest, onReset }: { digest: Digest; onRese
         title="The paper as a map"
         blurb="Every idea in the paper and how it connects, arranged by the role it plays in the argument."
       >
-        <ThemeMap map={digest.theme_map} />
+        <ThemeMap map={digest.theme_map} title={digest.meta.title} />
       </Block>
 
       <Block

@@ -12,12 +12,21 @@ Paste an arXiv link, upload a PDF, or drop in the text.
 
 ## What you get
 
-**A theme map.** The paper's argument as a labelled graph: the core claim in the
-centre, what was broken on the left, the machinery across the top, supporting
-ideas on the right, evidence and consequences along the bottom. Every edge is a
-real relationship *self-attention* **removes** *sequential bottleneck* not a
-vague line between related things. Hover anything to see what it means and what
-it connects to.
+**A graph of the argument.** The paper rendered the way Neo4j Browser renders a
+query result: circular nodes sized by importance, coloured and counted by label,
+joined by directed relationships that carry a real verb — *self-attention*
+**REMOVES** *sequential bottleneck*. Drag a node and it stays where you put it,
+double-click to release it, click one to open an inspector showing its
+properties and every relationship it takes part in. Hide a whole category from
+the label chips.
+
+Unlike a plain force layout, position still means something: each category is
+pulled toward its own region — problems left, machinery across the top,
+consequences and evidence right and below — so the graph settles into the shape
+of the argument rather than into whatever the physics prefers.
+
+The **Cypher** button turns the graph into `CREATE` statements you can paste
+straight into Neo4j Browser, if you would rather query it than look at it.
 
 **A summary at three depths.** The same paper written three times: no jargon at
 all, then for a researcher in an adjacent field, then for someone who might
@@ -151,10 +160,10 @@ backend/
     pipeline.py      source → parsed paper → digest
     jobs.py          in-process job registry behind the SSE stream
     main.py          the HTTP API
-  tests/             75 tests, no network or API key required
+  tests/             92 tests, no network or API key required
 frontend/
   src/
-    components/      ThemeMap.tsx is the centrepiece
+    components/      ThemeMap.tsx is the graph view; graph.ts holds its layout
     types.ts         mirrors models.py
 data/demo/           the bundled sample digest and the script that builds it
 ```

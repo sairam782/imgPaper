@@ -17,8 +17,9 @@ from . import __version__
 from .cache import DigestCache
 from .config import settings
 from .distill import Distiller, DistillError, load_demo_digest
+from .export_cypher import to_cypher
 from .jobs import STAGES, Job, registry
-from .models import Digest
+from .models import Digest, ThemeMap
 from .pipeline import IngestError, analyze_pdf_bytes, analyze_source
 
 app = FastAPI(
@@ -90,6 +91,17 @@ def get_digest(digest_id: str) -> Digest:
     if found is None:
         raise HTTPException(status_code=404, detail="No digest with that id.")
     return found
+
+
+class CypherRequest(BaseModel):
+    theme_map: ThemeMap
+    title: str | None = None
+
+
+@app.post("/api/export/cypher")
+def export_cypher(request: CypherRequest) -> dict[str, str]:
+    """Render a theme map as Cypher so it can be loaded into Neo4j."""
+    return {"cypher": to_cypher(request.theme_map, title=request.title)}
 
 
 # --------------------------------------------------------------------------

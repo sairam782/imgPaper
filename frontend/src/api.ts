@@ -94,3 +94,18 @@ export function followJob(
     };
   });
 }
+
+/** Render a theme map as Cypher, so the graph can be loaded into Neo4j. */
+export async function exportCypher(
+  themeMap: import("./types").ThemeMap,
+  title?: string,
+): Promise<string> {
+  const response = await fetch("/api/export/cypher", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme_map: themeMap, title }),
+  });
+  if (!response.ok) throw await failure(response);
+  const { cypher } = await response.json();
+  return cypher;
+}

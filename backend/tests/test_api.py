@@ -152,3 +152,26 @@ def test_upload_job_runs_the_pdf_pipeline(monkeypatch, demo_digest):
     assert final["status"] == "done"
     assert seen["filename"] == "sample_paper.pdf"
     assert seen["bytes"] == len(pdf)
+
+
+def test_cypher_export_endpoint_returns_a_loadable_statement(demo_digest):
+    response = client.post(
+        "/api/export/cypher",
+        json={
+            "theme_map": demo_digest.theme_map.model_dump(mode="json"),
+            "title": demo_digest.meta.title,
+        },
+    )
+    assert response.status_code == 200
+
+    cypher = response.json()["cypher"]
+    assert cypher.startswith("// Attention Is All You Need")
+    assert cypher.count("CREATE (") == len(demo_digest.theme_map.nodes) + len(
+        demo_digest.theme_map.edges
+    )
+    assert ":Idea:CoreIdea" in cypher
+
+
+def test_cypher_export_rejects_a_malformed_map():
+    response = client.post("/api/export/cypher", json={"theme_map": {"core": "x"}})
+    assert response.status_code == 422

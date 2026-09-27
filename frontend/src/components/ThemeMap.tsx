@@ -1,536 +1,596 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ConceptEdge, ConceptNode, NodeKind, ThemeMap as ThemeMapData } from "../types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  forceX,
+  forceY,
+  type Simulation,
+} from "d3-force";
 
-/* --------------------------------------------------------------------------
- * Layout
- *
- * A force simulation gives a different picture every run and buries the
- * argument in physics. Instead each kind of node owns a sector of the circle,
- * so the map always reads the same way: what was broken on the left, the
- * machinery across the top, supporting ideas on the right, consequences and
- * evidence along the bottom. Importance pulls a node towards the centre.
- * ------------------------------------------------------------------------ */
+import { exportCypher } from "../api";
+import type { NodeKind, ThemeMap as ThemeMapData } from "../types";
+import {
+  buildLinks,
+  buildNodes,
+  KIND_COLOR,
+  KIND_LABEL,
+  linkGeometry,
+  VIEW_H,
+  VIEW_W,
+  type SimLink,
+  type SimNode,
+} from "./graph";
 
-const W = 940;
-const H = 600;
-const CX = W / 2;
-const CY = H / 2;
-const SPREAD_X = 1.3;
-const SPREAD_Y = 0.94;
+const MIN_ZOOM = 0.4;
+const MAX_ZOOM = 2.6;
 
-/**
- * Angles in degrees, screen convention: 0 is east, 90 is south. Gaps between
- * sectors are deliberate: they keep neighbouring roles from running together,
- * so the eye can read "these are the problems, those are the methods".
- */
-const SECTORS: Record<Exclude<NodeKind, "core">, [number, number]> = {
-  problem: [150, 210],
-  method: [240, 300],
-  concept: [320, 355],
-  implication: [10, 45],
-  evidence: [75, 135],
-};
-
-export const KIND_COLOR: Record<NodeKind, string> = {
-  core: "var(--core)",
-  problem: "var(--problem)",
-  method: "var(--method)",
-  concept: "var(--concept)",
-  evidence: "var(--evidence)",
-  implication: "var(--implication)",
-};
-
-const KIND_LABEL: Record<NodeKind, string> = {
-  core: "core idea",
-  problem: "problem",
-  method: "method",
-  concept: "concept",
-  evidence: "evidence",
-  implication: "implication",
-};
-
-const CHAR_W = 6.6;
-const LINE_H = 14;
-
-/** Greedy wrap, so a two-word label never gets split across three lines. */
-function wrap(text: string, maxChars: number): string[] {
-  const words = text.split(/\s+/);
-  const lines: string[] = [];
-  let line = "";
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (candidate.length > maxChars && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-  }
-  if (line) lines.push(line);
-  return lines;
-}
-
-interface Placed {
-  node: ConceptNode;
+interface View {
+  k: number;
   x: number;
   y: number;
-  hw: number;
-  hh: number;
-  lines: string[];
 }
 
-function place(nodes: ConceptNode[]): Placed[] {
-  const core = nodes.find((n) => n.kind === "core") ?? nodes[0];
-  const placed: Placed[] = [];
-
-  const box = (node: ConceptNode, isCore: boolean): Pick<Placed, "hw" | "hh" | "lines"> => {
-    const lines = wrap(node.label, isCore ? 16 : 15);
-    const widest = Math.max(...lines.map((l) => l.length));
-    const pad = isCore ? 26 : 16;
-    return {
-      lines,
-      hw: Math.max(isCore ? 74 : 50, (widest * CHAR_W * (isCore ? 1.2 : 1)) / 2 + pad),
-      hh: (lines.length * LINE_H) / 2 + (isCore ? 18 : 13),
-    };
-  };
-
-  placed.push({ node: core, x: CX, y: CY, ...box(core, true) });
-
-  // Group by kind so each sector can be divided evenly among its members.
-  const byKind = new Map<string, ConceptNode[]>();
-  for (const node of nodes) {
-    if (node.id === core.id) continue;
-    const kind = node.kind === "core" ? "concept" : node.kind;
-    byKind.set(kind, [...(byKind.get(kind) ?? []), node]);
-  }
-
-  for (const [kind, members] of byKind) {
-    const [from, to] = SECTORS[kind as Exclude<NodeKind, "core">] ?? SECTORS.concept;
-    // Heaviest first, so the most important idea sits at the sector's middle.
-    const ordered = [...members].sort((a, b) => b.weight - a.weight);
-
-    ordered.forEach((node, index) => {
-      // Inset the ends of the sector so a two-node sector does not straddle
-      // its full width and brush against its neighbours.
-      const span = to - from;
-      const fraction =
-        ordered.length === 1 ? 0.5 : 0.12 + (index / (ordered.length - 1)) * 0.76;
-      const angle = ((from + span * fraction) * Math.PI) / 180;
-      // Weight pulls a node inwards; the stagger keeps neighbours off one ring.
-      const stagger = ordered.length > 2 ? (index % 2 === 0 ? 0 : 30) : 0;
-      const radius = 248 - node.weight * 52 + stagger;
-      placed.push({
-        node,
-        x: CX + Math.cos(angle) * radius * SPREAD_X,
-        y: CY + Math.sin(angle) * radius * SPREAD_Y,
-        ...box(node, false),
-      });
-    });
-  }
-
-  separate(placed);
-  return placed;
+interface Relationship {
+  dir: "in" | "out";
+  type: string;
+  other: SimNode;
 }
 
-/**
- * Nudge overlapping boxes apart.
- *
- * Sector placement gets the arrangement right but cannot know how wide a
- * label will render, so boxes from adjacent sectors sometimes collide. A few
- * passes of axis-aligned separation fix that while preserving the layout's
- * meaning, and being iterative-but-deterministic it still gives the same
- * picture every render.
- */
-function separate(placed: Placed[], iterations = 90): void {
-  const gap = 16;
-  for (let pass = 0; pass < iterations; pass++) {
-    let moved = false;
+const IDENTITY: View = { k: 1, x: 0, y: 0 };
 
-    for (let i = 1; i < placed.length; i++) {
-      for (let j = 0; j < placed.length; j++) {
-        if (i === j) continue;
-        const a = placed[i];
-        const b = placed[j];
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        const overlapX = a.hw + b.hw + gap - Math.abs(dx);
-        const overlapY = a.hh + b.hh + gap - Math.abs(dy);
-        if (overlapX <= 0 || overlapY <= 0) continue;
+export default function ThemeMap({ map, title }: { map: ThemeMapData; title?: string }) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
 
-        moved = true;
-        // Resolve along whichever axis needs the smaller correction, and keep
-        // the core pinned so the map stays centred on the paper's claim.
-        const pinned = j === 0;
-        if (overlapX < overlapY) {
-          const push = (overlapX / (pinned ? 1 : 2)) * (dx < 0 ? -1 : 1);
-          a.x += push;
-          if (!pinned) b.x -= push;
-        } else {
-          const push = (overlapY / (pinned ? 1 : 2)) * (dy < 0 ? -1 : 1);
-          a.y += push;
-          if (!pinned) b.y -= push;
-        }
-      }
+  const [selected, setSelected] = useState<string | null>(null);
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [muted, setMuted] = useState<Set<NodeKind>>(new Set());
+  const [view, setView] = useState<View>(IDENTITY);
+  const [cypher, setCypher] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [, setTick] = useState(0);
+  // Auto-framing stays on only until the reader takes over; after that the
+  // view is theirs and must not jump around under them.
+  const autoFit = useRef(true);
+
+  // d3-force mutates its nodes, so these are built once per map and then
+  // written to in place by the simulation.
+  const { nodes, links, byId } = useMemo(() => {
+    const nodes = buildNodes(map.nodes);
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    return { nodes, links: buildLinks(map.edges, new Set(byId.keys())), byId };
+  }, [map]);
+
+  /**
+   * Frame the whole graph.
+   *
+   * The forces decide how far apart things end up, which is not knowable in
+   * advance, so rather than tuning them until the result happens to fit, the
+   * view is fitted to whatever the simulation settles on.
+   */
+  const fitToView = useCallback(() => {
+    if (nodes.length === 0) return;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const node of nodes) {
+      minX = Math.min(minX, node.x - node.r);
+      minY = Math.min(minY, node.y - node.r);
+      maxX = Math.max(maxX, node.x + node.r);
+      maxY = Math.max(maxY, node.y + node.r);
     }
 
-    if (!moved) break;
-  }
+    const pad = 46;
+    const width = maxX - minX + pad * 2;
+    const height = maxY - minY + pad * 2;
+    const whole = Math.min(VIEW_W / width, VIEW_H / height);
 
-  // Keep everything inside the viewBox after the pushing about.
-  for (const item of placed) {
-    item.x = Math.min(W - item.hw - 8, Math.max(item.hw + 8, item.x));
-    item.y = Math.min(H - item.hh - 8, Math.max(item.hh + 8, item.y));
-  }
-}
+    /*
+     * On a phone the canvas is around 390 CSS pixels wide while the viewBox is
+     * 1000 units, so fitting the entire graph would render captions at about
+     * four pixels. Legibility wins over completeness: below that threshold the
+     * view zooms to the smallest readable scale and centres on the core idea,
+     * and the reader pans or uses the zoom buttons to reach the rest.
+     */
+    const rendered = svgRef.current?.getBoundingClientRect().width ?? VIEW_W;
+    const pixelsPerUnit = rendered / VIEW_W;
+    const smallestFont = Math.min(...nodes.map((n) => n.fontSize));
+    const legible = 9 / Math.max(0.0001, smallestFont * pixelsPerUnit);
 
-/** Stop an edge at the node's border rather than running under its label. */
-function edgeStop(from: Placed, to: Placed): { x: number; y: number } {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  if (dx === 0 && dy === 0) return { x: to.x, y: to.y };
-  const scale = Math.min(
-    dx === 0 ? Infinity : (to.hw + 6) / Math.abs(dx),
-    dy === 0 ? Infinity : (to.hh + 6) / Math.abs(dy),
-  );
-  return { x: to.x - dx * scale, y: to.y - dy * scale };
-}
+    const k = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.max(whole, legible)));
 
-interface Drawn {
-  edge: ConceptEdge;
-  path: string;
-  lx: number;
-  ly: number;
-  lw: number;
-}
+    // When everything no longer fits, keep the paper's central claim in frame.
+    const core = nodes.find((n) => n.kind === "core");
+    const focusX = k > whole && core ? core.x : (minX + maxX) / 2;
+    const focusY = k > whole && core ? core.y : (minY + maxY) / 2;
 
-/** Point on a quadratic bezier at parameter t. */
-function bezierAt(
-  t: number,
-  p0: { x: number; y: number },
-  c: { x: number; y: number },
-  p2: { x: number; y: number },
-): { x: number; y: number } {
-  const u = 1 - t;
-  return {
-    x: u * u * p0.x + 2 * u * t * c.x + t * t * p2.x,
-    y: u * u * p0.y + 2 * u * t * c.y + t * t * p2.y,
-  };
-}
+    setView({ k, x: VIEW_W / 2 - focusX * k, y: VIEW_H / 2 - focusY * k });
+  }, [nodes]);
 
-function draw(
-  edges: ConceptEdge[],
-  byId: Map<string, Placed>,
-  coreId: string,
-  caption: string,
-): Drawn[] {
-  const drawn: Drawn[] = [];
-  for (const edge of edges) {
-    const a = byId.get(edge.source);
-    const b = byId.get(edge.target);
-    if (!a || !b) continue; // a dangling edge is dropped, not drawn to nowhere
-
-    const start = edgeStop(b, a);
-    const end = edgeStop(a, b);
-    const mx = (start.x + end.x) / 2;
-    const my = (start.y + end.y) / 2;
-
-    // Edges that touch the core are radial already, so a straight line reads
-    // best. Rim-to-rim edges bow outwards to keep clear of the centre.
-    const touchesCore = edge.source === coreId || edge.target === coreId;
-    let cx = mx;
-    let cy = my;
-    if (!touchesCore) {
-      const ox = mx - CX;
-      const oy = my - CY;
-      const len = Math.hypot(ox, oy) || 1;
-      const bow = Math.hypot(end.x - start.x, end.y - start.y) * 0.16;
-      cx = mx + (ox / len) * bow;
-      cy = my + (oy / len) * bow;
-    }
-
-    // Labels on core edges sit two thirds of the way out towards the rim
-    // node. Parking them all at the midpoint piles every label on top of the
-    // core, which is exactly where the map most needs to stay readable.
-    const t = !touchesCore ? 0.5 : edge.source === coreId ? 0.68 : 0.32;
-    const at = bezierAt(t, start, { x: cx, y: cy }, end);
-
-    drawn.push({
-      edge,
-      path: `M ${start.x} ${start.y} Q ${cx} ${cy} ${end.x} ${end.y}`,
-      lx: at.x,
-      ly: at.y - 3,
-      lw: edge.label.length * 5.5 + 10,
-    });
-  }
-
-  // Treat the caption under the core node as something to route around.
-  const core = byId.get(coreId);
-  const obstacles = new Map(byId);
-  if (core) {
-    obstacles.set("__caption__", {
-      ...core,
-      y: core.y + core.hh + 22,
-      hw: (caption.length * 6) / 2 + 8,
-      hh: 9,
-    });
-  }
-
-  deconflictLabels(drawn, obstacles);
-  return drawn;
-}
-
-/**
- * Slide edge labels off each other and out from under the nodes.
- *
- * The anchor points are geometrically correct but take no account of how wide
- * the words render, so labels collide. Nudging them a few pixels keeps every
- * relationship readable while each stays next to the edge it names.
- */
-function deconflictLabels(drawn: Drawn[], obstacles: Map<string, Placed>): void {
-  const HALF_H = 8;
-  const gap = 4;
-  const boxes = [...obstacles.values()];
-
-  for (let pass = 0; pass < 40; pass++) {
-    let moved = false;
-
-    for (let i = 0; i < drawn.length; i++) {
-      const a = drawn[i];
-      const ahw = a.lw / 2;
-
-      // Labels must not sit on top of a node's own text.
-      for (const node of boxes) {
-        const dx = a.lx - node.x;
-        const dy = a.ly - node.y;
-        const ox = ahw + node.hw + gap - Math.abs(dx);
-        const oy = HALF_H + node.hh + gap - Math.abs(dy);
-        if (ox > 0 && oy > 0) {
-          moved = true;
-          if (ox < oy) a.lx += ox * (dx < 0 ? -1 : 1);
-          else a.ly += oy * (dy < 0 ? -1 : 1);
-        }
-      }
-
-      for (let j = i + 1; j < drawn.length; j++) {
-        const b = drawn[j];
-        const bhw = b.lw / 2;
-        const dx = a.lx - b.lx;
-        const dy = a.ly - b.ly;
-        const ox = ahw + bhw + gap - Math.abs(dx);
-        const oy = HALF_H * 2 + gap - Math.abs(dy);
-        if (ox <= 0 || oy <= 0) continue;
-
-        moved = true;
-        // Vertical separation keeps a label near the edge it belongs to,
-        // where sliding sideways would strand it over a different one.
-        const push = (oy / 2) * (dy < 0 ? -1 : 1);
-        a.ly += push;
-        b.ly -= push;
-      }
-    }
-
-    if (!moved) break;
-  }
-}
-
-/* ------------------------------------------------------------------------ */
-
-export default function ThemeMap({ map }: { map: ThemeMapData }) {
-  const [active, setActive] = useState<string | null>(null);
-  const canvas = useRef<HTMLDivElement>(null);
-
-  // On a narrow screen the map pans rather than shrinking, and the interesting
-  // part is the middle. Open there instead of against the left margin.
   useEffect(() => {
-    const element = canvas.current;
-    if (!element) return;
-    const overflow = element.scrollWidth - element.clientWidth;
-    if (overflow > 0) element.scrollLeft = overflow / 2;
-  }, [map]);
+    const simulation = forceSimulation<SimNode, SimLink>(nodes)
+      .force(
+        "link",
+        forceLink<SimNode, SimLink>(links)
+          .id((d) => d.id)
+          .distance((l) => {
+            const target = l.target as SimNode;
+            return 120 + target.r;
+          })
+          .strength(0.45),
+      )
+      .force("charge", forceManyBody<SimNode>().strength(-900))
+      .force("collide", forceCollide<SimNode>((d) => d.r + 16).strength(0.95))
+      // The anchors are what keep role meaningful; see graph.ts.
+      .force("anchorX", forceX<SimNode>((d) => d.anchorX).strength(0.08))
+      .force("anchorY", forceY<SimNode>((d) => d.anchorY).strength(0.08))
+      .on("tick", () => {
+        setTick((t) => t + 1);
+        // Framed on every tick rather than once at the end: d3 only emits
+        // "end" when its timer stops, which a restart can postpone
+        // indefinitely, and fitting as it settles keeps the graph in frame
+        // throughout the opening animation.
+        if (autoFit.current) fitToView();
+      });
 
-  const { placed, byId, coreId, drawnEdges } = useMemo(() => {
-    const placed = place(map.nodes);
-    const byId = new Map(placed.map((p) => [p.node.id, p]));
-    const coreId = (map.nodes.find((n) => n.kind === "core") ?? map.nodes[0])?.id ?? "";
-    return {
-      placed,
-      byId,
-      coreId,
-      drawnEdges: draw(map.edges, byId, coreId, map.core),
+    simRef.current = simulation;
+    return () => {
+      simulation.stop();
+      simRef.current = null;
     };
-  }, [map]);
+  }, [nodes, links, fitToView]);
+
+  // -- coordinate conversion ------------------------------------------------
+
+  const toGraph = useCallback(
+    (clientX: number, clientY: number) => {
+      const svg = svgRef.current;
+      if (!svg) return { x: 0, y: 0 };
+      const rect = svg.getBoundingClientRect();
+      const scale = VIEW_W / rect.width;
+      const vx = (clientX - rect.left) * scale;
+      const vy = (clientY - rect.top) * scale;
+      return { x: (vx - view.x) / view.k, y: (vy - view.y) / view.k };
+    },
+    [view],
+  );
+
+  // -- dragging -------------------------------------------------------------
+
+  const dragging = useRef<string | null>(null);
+
+  const onNodePointerDown = (event: React.PointerEvent, node: SimNode) => {
+    event.stopPropagation();
+    (event.target as Element).setPointerCapture?.(event.pointerId);
+    dragging.current = node.id;
+    autoFit.current = false;
+    simRef.current?.alphaTarget(0.25).restart();
+  };
+
+  const onNodePointerMove = (event: React.PointerEvent, node: SimNode) => {
+    if (dragging.current !== node.id) return;
+    const point = toGraph(event.clientX, event.clientY);
+    node.fx = point.x;
+    node.fy = point.y;
+  };
+
+  const onNodePointerUp = (event: React.PointerEvent, node: SimNode) => {
+    if (dragging.current !== node.id) return;
+    (event.target as Element).releasePointerCapture?.(event.pointerId);
+    dragging.current = null;
+    // Neo4j leaves a dragged node where you put it; double-click frees it.
+    simRef.current?.alphaTarget(0);
+  };
+
+  const unpin = (node: SimNode) => {
+    if (node.kind === "core") return; // the core stays put, it is the anchor
+    node.fx = null;
+    node.fy = null;
+    simRef.current?.alpha(0.5).restart();
+  };
+
+  // -- zoom and pan ---------------------------------------------------------
+
+  const panning = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+
+  const onBackgroundPointerDown = (event: React.PointerEvent) => {
+    (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+    panning.current = { x: event.clientX, y: event.clientY, vx: view.x, vy: view.y };
+    autoFit.current = false;
+    setSelected(null);
+  };
+
+  const onBackgroundPointerMove = (event: React.PointerEvent) => {
+    const start = panning.current;
+    if (!start) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const scale = VIEW_W / svg.getBoundingClientRect().width;
+    setView((current) => ({
+      ...current,
+      x: start.vx + (event.clientX - start.x) * scale,
+      y: start.vy + (event.clientY - start.y) * scale,
+    }));
+  };
+
+  const onBackgroundPointerUp = () => {
+    panning.current = null;
+  };
+
+  const zoomBy = useCallback((factor: number, originX?: number, originY?: number) => {
+    autoFit.current = false;
+    setView((current) => {
+      const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.k * factor));
+      if (k === current.k) return current;
+      const cx = originX ?? VIEW_W / 2;
+      const cy = originY ?? VIEW_H / 2;
+      // Keep the point under the cursor fixed while the scale changes.
+      return {
+        k,
+        x: cx - ((cx - current.x) / current.k) * k,
+        y: cy - ((cy - current.y) / current.k) * k,
+      };
+    });
+  }, []);
+
+  // Registered natively so the wheel listener can be non-passive and this can
+  // zoom without also scrolling the page.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      const scale = VIEW_W / rect.width;
+      zoomBy(
+        event.deltaY < 0 ? 1.12 : 1 / 1.12,
+        (event.clientX - rect.left) * scale,
+        (event.clientY - rect.top) * scale,
+      );
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [zoomBy]);
+
+  const resetLayout = () => {
+    for (const node of nodes) {
+      if (node.kind === "core") continue;
+      node.fx = null;
+      node.fy = null;
+    }
+    autoFit.current = true; // re-frame as it settles
+    simRef.current?.alpha(0.9).restart();
+  };
+
+  // -- derived state --------------------------------------------------------
+
+  const active = hovered ?? selected;
 
   const neighbours = useMemo(() => {
-    if (!active) return new Set<string>();
+    if (!active) return null;
     const set = new Set<string>([active]);
-    for (const { source, target } of map.edges) {
+    for (const link of links) {
+      const source = (link.source as SimNode).id ?? (link.source as string);
+      const target = (link.target as SimNode).id ?? (link.target as string);
       if (source === active) set.add(target);
       if (target === active) set.add(source);
     }
     return set;
-  }, [active, map.edges]);
+  }, [active, links]);
 
-  const selected = active ? byId.get(active)?.node : undefined;
-  const relations = useMemo(() => {
-    if (!active) return [];
-    return map.edges
-      .filter((e) => e.source === active || e.target === active)
-      .map((e) => {
-        const otherId = e.source === active ? e.target : e.source;
-        const other = byId.get(otherId)?.node;
-        return {
-          outgoing: e.source === active,
-          label: e.label,
-          other: other?.label ?? otherId,
-          kind: other?.kind ?? "concept",
-        };
-      });
-  }, [active, map.edges, byId]);
+  const counts = useMemo(() => {
+    const out = new Map<NodeKind, number>();
+    for (const node of map.nodes) out.set(node.kind, (out.get(node.kind) ?? 0) + 1);
+    return out;
+  }, [map.nodes]);
 
-  const kindsPresent = Array.from(new Set(map.nodes.map((n) => n.kind)));
+  const toggleKind = (kind: NodeKind) =>
+    setMuted((current) => {
+      const next = new Set(current);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+
+  const selectedNode = selected ? byId.get(selected) : undefined;
+
+  const relationships = useMemo<Relationship[]>(() => {
+    if (!selected) return [];
+    return links.flatMap<Relationship>((link) => {
+      const source = link.source as SimNode;
+      const target = link.target as SimNode;
+      if (source.id === selected) {
+        return [{ dir: "out", type: link.label, other: target }];
+      }
+      if (target.id === selected) {
+        return [{ dir: "in", type: link.label, other: source }];
+      }
+      return [];
+    });
+  }, [selected, links]);
+
+  const isDimmed = (node: SimNode) =>
+    muted.has(node.kind) || (neighbours !== null && !neighbours.has(node.id));
 
   return (
-    <div className="map-wrap">
-      <div className="map-canvas" ref={canvas}>
-        <svg
-        viewBox={`0 0 ${W} ${H}`}
+    <div className="graph">
+      <div className="graph-toolbar">
+        <div className="graph-labels">
+          {[...counts.entries()].map(([kind, count]) => (
+            <button
+              key={kind}
+              className={`label-chip${muted.has(kind) ? " is-muted" : ""}`}
+              style={{ ["--chip" as string]: KIND_COLOR[kind] }}
+              onClick={() => toggleKind(kind)}
+              title={muted.has(kind) ? `Show ${KIND_LABEL[kind]}` : `Hide ${KIND_LABEL[kind]}`}
+            >
+              <i />
+              {KIND_LABEL[kind]}
+              <b>{count}</b>
+            </button>
+          ))}
+        </div>
+
+        <div className="graph-controls">
+          <button onClick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in">
+            +
+          </button>
+          <button onClick={() => zoomBy(1 / 1.25)} aria-label="Zoom out" title="Zoom out">
+            −
+          </button>
+          <button onClick={resetLayout} title="Re-run the layout and unpin every node">
+            Reset
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                setCypher(await exportCypher(map, title));
+              } catch (caught) {
+                setCypher(
+                  `// Could not build the export: ${
+                    caught instanceof Error ? caught.message : "unknown error"
+                  }`,
+                );
+              }
+            }}
+            title="Render this graph as Cypher for Neo4j"
+          >
+            Cypher
+          </button>
+        </div>
+      </div>
+
+      <svg
+        ref={svgRef}
+        className="graph-canvas"
+        viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
         role="img"
-        aria-label={`Concept map. Central idea: ${map.core}. ${map.nodes.length} connected ideas.`}
-        onClick={(event) => {
-          // A click on the background clears the selection.
-          if (event.target === event.currentTarget) setActive(null);
-        }}
+        aria-label={`Graph of the paper's argument. Core idea: ${map.core}. ${map.nodes.length} nodes, ${links.length} relationships.`}
       >
         <defs>
-          <radialGradient id="pp-glow">
-            <stop offset="0%" stopColor="var(--core)" stopOpacity="0.16" />
-            <stop offset="100%" stopColor="var(--core)" stopOpacity="0" />
-          </radialGradient>
+          <marker
+            id="pp-arrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 1 L 9 5 L 0 9 z" className="arrow-head" />
+          </marker>
+          <marker
+            id="pp-arrow-lit"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 1 L 9 5 L 0 9 z" className="arrow-head is-lit" />
+          </marker>
         </defs>
 
-        <ellipse cx={CX} cy={CY} rx={230} ry={150} fill="url(#pp-glow)" />
+        <rect
+          className="graph-backdrop"
+          width={VIEW_W}
+          height={VIEW_H}
+          onPointerDown={onBackgroundPointerDown}
+          onPointerMove={onBackgroundPointerMove}
+          onPointerUp={onBackgroundPointerUp}
+          onPointerCancel={onBackgroundPointerUp}
+        />
 
-        <g>
-          {drawnEdges.map(({ edge, path, lx, ly, lw }, index) => {
-            const lit =
-              active !== null && (edge.source === active || edge.target === active);
-            const dim = active !== null && !lit;
-            return (
-              <g key={`${edge.source}-${edge.target}-${index}`}>
-                <path
-                  className={`map-edge${lit ? " is-lit" : ""}${dim ? " is-dim" : ""}`}
-                  d={path}
-                />
-                {/* A backing plate keeps the label legible where it crosses
-                    another edge. */}
-                <rect
-                  className={`map-edge-plate${dim ? " is-dim" : ""}`}
-                  x={lx - lw / 2}
-                  y={ly - 9}
-                  width={lw}
-                  height={13}
-                  rx={3}
-                />
-                <text
-                  className={`map-edge-label${lit ? " is-lit" : ""}${dim ? " is-dim" : ""}`}
-                  x={lx}
-                  y={ly}
+        <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
+          <g className="graph-links">
+            {links.map((link, index) => {
+              const source = link.source as SimNode;
+              const target = link.target as SimNode;
+              if (typeof source === "string" || typeof target === "string") return null;
+
+              const geometry = linkGeometry(source, target, link.twin);
+              if (!geometry) return null;
+
+              const lit =
+                active !== null && (source.id === active || target.id === active);
+              const dim =
+                muted.has(source.kind) ||
+                muted.has(target.kind) ||
+                (active !== null && !lit);
+
+              return (
+                <g
+                  key={`${source.id}-${target.id}-${index}`}
+                  className={`link${lit ? " is-lit" : ""}${dim ? " is-dim" : ""}`}
                 >
-                  {edge.label}
-                </text>
-              </g>
-            );
-          })}
-        </g>
+                  <path
+                    d={geometry.path}
+                    markerEnd={`url(#${lit ? "pp-arrow-lit" : "pp-arrow"})`}
+                  />
+                  <rect
+                    className="link-plate"
+                    x={geometry.labelX - (link.label.length * 5.4 + 12) / 2}
+                    y={geometry.labelY - 8}
+                    width={link.label.length * 5.4 + 12}
+                    height={16}
+                    rx={8}
+                  />
+                  <text x={geometry.labelX} y={geometry.labelY + 3.5}>
+                    {link.label}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
 
-        {placed.map(({ node, x, y, hw, hh, lines }) => {
-          const isCore = node.id === coreId;
-          const dim = active !== null && !neighbours.has(node.id);
-          const isActive = node.id === active;
-          const color = KIND_COLOR[node.kind];
-          return (
-            <g
-              key={node.id}
-              className={`map-node${isCore ? " is-core" : ""}${dim ? " is-dim" : ""}`}
-              tabIndex={0}
-              role="button"
-              aria-pressed={isActive}
-              aria-label={`${node.label}. ${KIND_LABEL[node.kind]}. ${node.blurb}`}
-              onClick={() => setActive(isActive ? null : node.id)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setActive(isActive ? null : node.id);
+          <g className="graph-nodes">
+            {nodes.map((node) => {
+              const dim = isDimmed(node);
+              const pinned = node.fx != null && node.kind !== "core";
+
+              return (
+                <g
+                  key={node.id}
+                  className={`node${node.id === selected ? " is-selected" : ""}${dim ? " is-dim" : ""}`}
+                  transform={`translate(${node.x} ${node.y})`}
+                  tabIndex={0}
+                  role="button"
+                  aria-pressed={node.id === selected}
+                  aria-label={`${node.label}. ${KIND_LABEL[node.kind]}. ${node.blurb}`}
+                  onPointerDown={(event) => onNodePointerDown(event, node)}
+                  onPointerMove={(event) => onNodePointerMove(event, node)}
+                  onPointerUp={(event) => onNodePointerUp(event, node)}
+                  onPointerEnter={() => setHovered(node.id)}
+                  onPointerLeave={() => setHovered(null)}
+                  onClick={() => setSelected(node.id === selected ? null : node.id)}
+                  onDoubleClick={() => unpin(node)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setSelected(node.id === selected ? null : node.id);
+                    }
+                  }}
+                >
+                  <circle
+                    className="node-ring"
+                    r={node.r + 5}
+                    style={{ stroke: KIND_COLOR[node.kind] }}
+                  />
+                  <circle
+                    className="node-body"
+                    r={node.r}
+                    style={{ fill: KIND_COLOR[node.kind] }}
+                  />
+                  <text
+                    className="node-caption"
+                    fontSize={node.fontSize}
+                    y={node.lines.length === 1 ? node.fontSize * 0.35 : -node.fontSize * 0.15}
+                  >
+                    {node.lines.map((line, index) => (
+                      <tspan key={index} x={0} dy={index === 0 ? 0 : node.fontSize * 1.15}>
+                        {line}
+                      </tspan>
+                    ))}
+                  </text>
+                  {pinned && (
+                    <circle className="node-pin" cx={node.r * 0.72} cy={-node.r * 0.72} r={4} />
+                  )}
+                </g>
+              );
+            })}
+          </g>
+        </g>
+      </svg>
+
+      {cypher !== null && (
+        <div
+          className="cypher-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Cypher export"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setCypher(null);
+          }}
+        >
+          <div className="cypher-sheet">
+            <header>
+              <h4>Load this graph into Neo4j</h4>
+              <button className="chip" onClick={() => setCypher(null)}>
+                Close
+              </button>
+            </header>
+            <p className="depth-note" style={{ marginTop: 0 }}>
+              Paste into Neo4j Browser or pipe through cypher-shell.
+            </p>
+            <pre>{cypher}</pre>
+            <button
+              className="primary"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(cypher);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1800);
+                } catch {
+                  setCopied(false);
                 }
               }}
-              onMouseEnter={() => setActive(node.id)}
-              onMouseLeave={() => setActive(null)}
             >
-              <rect
-                className="node-box"
-                x={x - hw}
-                y={y - hh}
-                width={hw * 2}
-                height={hh * 2}
-                rx={isCore ? 18 : 10}
-                fill={isCore ? color : `color-mix(in srgb, ${color} 15%, var(--surface-2))`}
-                stroke={color}
-                strokeWidth={isActive ? 2.4 : 1.4}
-              />
-              <text
-                x={x}
-                y={y - ((lines.length - 1) * LINE_H) / 2 + 4}
-                textAnchor="middle"
-                fontSize={isCore ? 15.5 : 12.5}
-              >
-                {lines.map((line, index) => (
-                  <tspan key={line + index} x={x} dy={index === 0 ? 0 : LINE_H}>
-                    {line}
-                  </tspan>
-                ))}
-              </text>
-            </g>
-          );
-        })}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        </div>
+      )}
 
-          <text
-            className="map-core-label"
-            x={CX}
-            y={CY + (byId.get(coreId)?.hh ?? 40) + 22}
-          >
-            {map.core}
-          </text>
-        </svg>
-      </div>
-
-      <div className="map-legend">
-        {kindsPresent.map((kind) => (
-          <span key={kind}>
-            <i style={{ background: KIND_COLOR[kind] }} />
-            {KIND_LABEL[kind]}
-          </span>
-        ))}
-      </div>
-
-      <div className="map-detail" aria-live="polite">
-        {selected ? (
+      <div className="inspector" aria-live="polite">
+        {selectedNode ? (
           <>
-            <div className="kind" style={{ color: KIND_COLOR[selected.kind] }}>
-              {KIND_LABEL[selected.kind]}
+            <div className="inspector-head">
+              <span
+                className="label-chip is-static"
+                style={{ ["--chip" as string]: KIND_COLOR[selectedNode.kind] }}
+              >
+                <i />
+                {KIND_LABEL[selectedNode.kind]}
+              </span>
+              <h4>{selectedNode.label}</h4>
             </div>
-            <h4>{selected.label}</h4>
-            <p>{selected.blurb}</p>
-            {relations.length > 0 && (
-              <div className="rels">
-                {relations.map((rel, index) => (
+
+            <dl className="properties">
+              <div>
+                <dt>id</dt>
+                <dd className="mono">{selectedNode.id}</dd>
+              </div>
+              <div>
+                <dt>weight</dt>
+                <dd className="mono">{selectedNode.weight.toFixed(2)}</dd>
+              </div>
+              <div className="wide">
+                <dt>summary</dt>
+                <dd>{selectedNode.blurb}</dd>
+              </div>
+            </dl>
+
+            {relationships.length > 0 && (
+              <div className="rel-list">
+                {relationships.map((relationship, index) => (
                   <span className="rel" key={index}>
-                    {rel.outgoing ? (
+                    {relationship.dir === "out" ? (
                       <>
-                        <b>{rel.label}</b> → {rel.other}
+                        <em>-[:{relationship.type.toUpperCase().replace(/\s+/g, "_")}]-&gt;</em>
+                        <b style={{ color: KIND_COLOR[relationship.other.kind] }}>
+                          {relationship.other.label}
+                        </b>
                       </>
                     ) : (
                       <>
-                        {rel.other} <b>{rel.label}</b> → this
+                        <b style={{ color: KIND_COLOR[relationship.other.kind] }}>
+                          {relationship.other.label}
+                        </b>
+                        <em>-[:{relationship.type.toUpperCase().replace(/\s+/g, "_")}]-&gt;</em>
                       </>
                     )}
                   </span>
@@ -539,9 +599,11 @@ export default function ThemeMap({ map }: { map: ThemeMapData }) {
             )}
           </>
         ) : (
-          <p className="map-hint">
-            Hover or select any idea to see what it means and how it connects. The centre
-            is the paper's core claim; everything else is arranged around it by role.
+          <p className="inspector-hint">
+            <strong>{map.core}</strong> — select a node to inspect it, drag to move
+            it, double-click to release one you have moved. Drag the background to pan,
+            zoom with the + and − buttons or a scroll wheel, and use the labels above to
+            hide a category.
           </p>
         )}
       </div>
